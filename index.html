@@ -43,8 +43,9 @@
 
   <label>Mode</label>
   <select id="mode">
-    <option value="copy">Lossless (zero quality loss, keyframe pe cut)</option>
-    <option value="exact">Exact timing (re-encode, almost lossless, slow)</option>
+    <option value="exact">Exact 10s (re-encode, fast, quality almost same)</option>
+    <option value="best">Exact 10s (best quality, bahut slow)</option>
+    <option value="copy">Lossless copy (zero loss, par part 10s se thoda alag ho sakta hai)</option>
   </select>
 
   <button id="go" disabled>Split Video</button>
@@ -65,7 +66,14 @@ const ffmpeg = createFFmpeg({
   log: false,
   corePath: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
 });
-ffmpeg.setProgress(p => setMsg(`Processing... ${Math.round((p.ratio || 0) * 100)}%`));
+let cur = { i: 0, n: 0, len: 0 };
+ffmpeg.setLogger(({ message }) => {
+  const m = /time=(\d+):(\d+):([\d.]+)/.exec(message);
+  if (m && cur.len) {
+    const t = +m[1] * 3600 + +m[2] * 60 + +m[3];
+    setMsg(`Part ${cur.i}/${cur.n}: ${Math.min(100, Math.round(t / cur.len * 100))}% ho gaya...`);
+  }
+});
 
 let file = null, duration = 0, results = [];
 
@@ -98,12 +106,19 @@ $('go').onclick = async () => {
     const ext = (file.name.split('.').pop() || 'mp4').toLowerCase();
     ffmpeg.FS('writeFile', 'in.' + ext, await fetchFile(file));
     for (let i = 0; i < parts.length; i++) {
-      setMsg(`Part ${i+1}/${parts.length} bana raha hai...`);
+      cur = { i: i + 1, n: parts.length, len: parts[i].len };
+      setMsg(`Part ${i+1}/${parts.length} shuru ho raha hai (re-encode me thoda time lagta hai)...`);
       const name = `part_${i+1}.${ext}`;
-      const args = ['-ss', String(parts[i].start), '-i', 'in.' + ext, '-t', String(parts[i].len)];
-      if (mode === 'copy') args.push('-c', 'copy', '-avoid_negative_ts', 'make_zero');
-      else args.push('-c:v', 'libx264', '-crf', '12', '-preset', 'veryfast', '-c:a', 'copy');
-      args.push(name);
+      let args;
+      if (mode === 'copy') {
+        // -ss output side pe: keyframe se pehle ke extra frames nahi aate, to part 10s ke close rehta hai
+        args = ['-i', 'in.' + ext, '-ss', String(parts[i].start), '-t', String(parts[i].len),
+                '-c', 'copy', '-avoid_negative_ts', 'make_zero', name];
+      } else {
+        const [crf, preset] = mode === 'best' ? ['12', 'veryfast'] : ['17', 'ultrafast'];
+        args = ['-ss', String(parts[i].start), '-i', 'in.' + ext, '-t', String(parts[i].len),
+                '-c:v', 'libx264', '-crf', crf, '-preset', preset, '-pix_fmt', 'yuv420p', '-c:a', 'copy', name];
+      }
       await ffmpeg.run(...args);
       const data = ffmpeg.FS('readFile', name);
       ffmpeg.FS('unlink', name);
